@@ -2,9 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-'''
-这一个是根据模型图的组件设计的对频域上采样模块的消融。
-'''
+
 # ---------- 新增/修改的辅助模块 ----------
 class InstanceNormalization(nn.Module):
     """
@@ -57,6 +55,7 @@ class FrequencyEnhancedModule(nn.Module):
     """
     def __init__(self, n_fft=64, hop_length=None):
         super(FrequencyEnhancedModule, self).__init__()
+        #n_fft就是短时傅里叶变换中切分原始序列的长度大小，原始长度按照这个长度和hoplength切成短的片段，对每个小的片段做傅里叶变换
         self.n_fft = n_fft
         self.hop_length = hop_length if hop_length is not None else n_fft // 2
         # hann window (non-trainable)
@@ -148,8 +147,8 @@ class Model(nn.Module):
         self.decompsition = series_decomp(kernel_size)
         self.individual = configs.individual
 
-        # self.dominance_freq = configs.cut_freq
-        # self.length_ratio = (self.seq_len + self.pred_len) / self.seq_len
+        self.dominance_freq = configs.cut_freq
+        self.length_ratio = (self.seq_len + self.pred_len) / self.seq_len
 
         # DLinear for trend
         if self.individual:
@@ -163,21 +162,22 @@ class Model(nn.Module):
             self.Linear_Trend = nn.Linear(self.seq_len, self.pred_len)
             self.Linear_Trend.weight = nn.Parameter((1 / self.seq_len) * torch.ones([self.pred_len, self.seq_len]))
 
-        self.seasonal_trend = nn.Linear(self.seq_len, self.pred_len)
-        self.seasonal_trend.weight = nn.Parameter((1 / self.seq_len) * torch.ones([self.pred_len, self.seq_len]))
+        # FITS freq upsampler (keep your complex approach)
+        # self.alpha_param = nn.Parameter(torch.zeros(1, self.enc_in, 1))
+        #调gc19_c d e时调的代码
+        self.alpha_param = nn.Parameter(
+            torch.full((1, self.enc_in, 1), -0.2)  # 全部填充为 -0.2
+        )
 
-        self.alpha_param = nn.Parameter(torch.zeros(1, self.enc_in, 1))
-        
-        # FITS freq upsampler (keep your complex approach)        
-        # if self.individual:
-        #     self.freq_upsampler = nn.ModuleList()
-        #     for i in range(self.channels):
-        #         # Linear expecting real->complex conversion done later; to keep compatibility,
-        #         # we will keep your approach but ensure dtype handling at call time
-        #         lin = nn.Linear(self.dominance_freq, int(self.dominance_freq * self.length_ratio))
-        #         self.freq_upsampler.append(lin)
-        # else:
-        #     self.freq_upsampler = nn.Linear(self.dominance_freq, int(self.dominance_freq * self.length_ratio))
+        if self.individual:
+            self.freq_upsampler = nn.ModuleList()
+            for i in range(self.channels):
+                # Linear expecting real->complex conversion done later; to keep compatibility,
+                # we will keep your approach but ensure dtype handling at call time
+                lin = nn.Linear(self.dominance_freq, int(self.dominance_freq * self.length_ratio))
+                self.freq_upsampler.append(lin)
+        else:
+            self.freq_upsampler = nn.Linear(self.dominance_freq, int(self.dominance_freq * self.length_ratio))
 
         # ---------------- 新增模块 ----------------
         # Instance normalization module (减去最后一个时间步)
@@ -191,7 +191,7 @@ class Model(nn.Module):
         self.freq_enhancer = FrequencyEnhancedModule(n_fft=n_fft, hop_length=hop)
         # -----------------------------------------
 
-    def forward(self, x, x_mark_enc, x_dec, x_mark_dec, mask=None):
+    def forward(self, x,batch_x_mark, dec_inp, batch_y_mark):
         # x: [B, seq_len, C]
         B, L, C = x.shape
 
@@ -236,53 +236,49 @@ class Model(nn.Module):
         seasonal_enhanced_ci = self.freq_enhancer.forward(seasonal_ci)  # [B*C, L, 1]
         # 3) inverse channel independent -> [B, L, C]
         seasonal_enhanced = self.channel_independent.inverse(seasonal_enhanced_ci, (B, L, C))
-        #用Linear映射到pred_len
-        seasonal_output = self.seasonal_trend(seasonal_enhanced.permute(0,2,1))
-        #得到[B,C,pred_len]
-        seasonal_output = seasonal_output.permute(0,2,1) #[B,pred_len,C]
 
-        # # 接下来沿用你原来的频域 upsampling 流程，但用 seasonal_enhanced 替代 seasonal_init
-        # # low_specx: rfft over time dim
-        # low_specx = torch.fft.rfft(seasonal_enhanced, dim=1)  # [B, freq_bins, C]
-        # # apply LPF as before
-        # low_specx[:, self.dominance_freq:, :] = 0
-        # low_specx = low_specx[:, 0:self.dominance_freq, :]  # [B, df, C]
+        # 接下来沿用你原来的频域 upsampling 流程，但用 seasonal_enhanced 替代 seasonal_init
+        # low_specx: rfft over time dim
+        low_specx = torch.fft.rfft(seasonal_enhanced, dim=1)  # [B, freq_bins, C]
+        # apply LPF as before
+        low_specx[:, self.dominance_freq:, :] = 0
+        low_specx = low_specx[:, 0:self.dominance_freq, :]  # [B, df, C]
 
-        # # freq upsampling (你的 complex linear)
-        # if self.individual:
-        #     low_specxy_ = torch.zeros([B, int(self.dominance_freq * self.length_ratio), C], dtype=low_specx.dtype, device=low_specx.device)
-        #     for i in range(self.channels):
-        #         # freq_upsampler[i] is a real Linear; apply per channel on real+imag concatenated representation
-        #         # 为简单起见，这里对 real 和 imag 分别做 upsample，再合成 complex（保持和你原来思路等价）
-        #         real = low_specx[:, :, i].real  # [B, df]
-        #         imag = low_specx[:, :, i].imag  # [B, df]
-        #         up_real = self.freq_upsampler[i](real)  # [B, new_df]
-        #         up_imag = self.freq_upsampler[i](imag)  # [B, new_df]
-        #         low_specxy_[:, :, i] = torch.complex(up_real, up_imag)
-        # else:
-        #     # low_specx: [B, df, C] -> permute to [B, C, df] -> apply linear -> [B, C, df_new] -> permute
-        #     # we apply linear on last dim by permuting
-        #     tmp = low_specx.permute(0, 2, 1)  # [B, C, df]
-        #     # separate real/imag and process separately
-        #     real = tmp.real
-        #     imag = tmp.imag
-        #     up_real = self.freq_upsampler(real)  # [B, C, df_new]
-        #     up_imag = self.freq_upsampler(imag)
-        #     low_specxy_ = torch.complex(up_real, up_imag).permute(0, 2, 1)  # [B, df_new, C]
+        # freq upsampling (你的 complex linear)
+        if self.individual:
+            low_specxy_ = torch.zeros([B, int(self.dominance_freq * self.length_ratio), C], dtype=low_specx.dtype, device=low_specx.device)
+            for i in range(self.channels):
+                # freq_upsampler[i] is a real Linear; apply per channel on real+imag concatenated representation
+                # 为简单起见，这里对 real 和 imag 分别做 upsample，再合成 complex（保持和你原来思路等价）
+                real = low_specx[:, :, i].real  # [B, df]
+                imag = low_specx[:, :, i].imag  # [B, df]
+                up_real = self.freq_upsampler[i](real)  # [B, new_df]
+                up_imag = self.freq_upsampler[i](imag)  # [B, new_df]
+                low_specxy_[:, :, i] = torch.complex(up_real, up_imag)
+        else:
+            # low_specx: [B, df, C] -> permute to [B, C, df] -> apply linear -> [B, C, df_new] -> permute
+            # we apply linear on last dim by permuting
+            tmp = low_specx.permute(0, 2, 1)  # [B, C, df]
+            # separate real/imag and process separately
+            real = tmp.real
+            imag = tmp.imag
+            up_real = self.freq_upsampler(real)  # [B, C, df_new]
+            up_imag = self.freq_upsampler(imag)
+            low_specxy_ = torch.complex(up_real, up_imag).permute(0, 2, 1)  # [B, df_new, C]
 
-        # # zero pad to expected rfft length (seq_len + pred_len)/2 + 1
-        # df_new = int((self.seq_len + self.pred_len) / 2 + 1)
-        # low_specxy = torch.zeros([B, df_new, C], dtype=low_specxy_.dtype, device=low_specxy_.device)
-        # low_specxy[:, 0:low_specxy_.size(1), :] = low_specxy_
+        # zero pad to expected rfft length (seq_len + pred_len)/2 + 1
+        df_new = int((self.seq_len + self.pred_len) / 2 + 1)
+        low_specxy = torch.zeros([B, df_new, C], dtype=low_specxy_.dtype, device=low_specxy_.device)
+        low_specxy[:, 0:low_specxy_.size(1), :] = low_specxy_
 
-        # # inverse rfft -> time domain length seq_len + pred_len
-        # low_xy = torch.fft.irfft(low_specxy, n=(self.seq_len + self.pred_len), dim=1)  # [B, seq_len+pred_len, C]
-        # low_xy = low_xy * self.length_ratio  # energy compensation
+        # inverse rfft -> time domain length seq_len + pred_len
+        low_xy = torch.fft.irfft(low_specxy, n=(self.seq_len + self.pred_len), dim=1)  # [B, seq_len+pred_len, C]
+        low_xy = low_xy * self.length_ratio  # energy compensation
 
         # undo standardization for seasonal branch and instance norm inverse
         # xy = (low_xy) * torch.sqrt(x_var) + x_mean  # [B, seq_len+pred_len, C]
-        # seasonal_pred = low_xy[:, -self.pred_len:, :]  # [B, pred_len, C]
-        seasonal_pred = self.instance_norm.inverse(seasonal_output, last_val)
+        seasonal_pred = low_xy[:, -self.pred_len:, :]  # [B, pred_len, C]
+        seasonal_pred = self.instance_norm.inverse(seasonal_pred, last_val)
 
         # ----------------- 融合 -----------------
         alpha = torch.sigmoid(self.alpha_param)  # [1, C, 1]

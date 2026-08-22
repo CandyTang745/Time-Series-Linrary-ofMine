@@ -1,6 +1,9 @@
 # Cloud‑Workload‑Forecasting‑Baselines
 This repository contains the implementation of my master's research for **short‑term & long‑term cloud workload forecasting**, including two proposed models **TFC** and **FDFormer**, as well as multiple mainstream time‑series SOTA baselines.
 
+![Model Architecture](./assets/TFC模型图.svg)
+![Model Architecture](./assets/FDFormer框架图.svg)
+
 > 🔗 Related Papers (Under Review)
 > 1. *Harnessing Time‑Frequency Collaboration for Short‑Term Cloud Workload Forecasting* (TFC, lightweight short‑term forecast)
 > 2. *FDFormer: A Frequency‑Decoupled Dual‑Path Learning Framework for Long‑Term Cloud Workload Forecasting* (FDFormer, long‑term forecast)

@@ -38,6 +38,7 @@ numpy, pandas, scipy, matplotlib
 3. Run training:
 ```bash
 python run.py
+```
 
 📊 Datasets
 - Public cluster traces: Alibaba Cluster Trace, Google Cluster Trace

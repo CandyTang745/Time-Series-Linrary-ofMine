@@ -21,8 +21,8 @@ This repo provides a unified experimental pipeline: data preprocessing, baseline
 ├── dataset_norm         # Time‑series data normalization & cleaning
 ├── exp                  # Training & evaluation experiment entry
 ├── layers               # Custom network layers (Frequency‑domain decomposition layers for FDFormer)
-├── mdels1               # Implemented models: TFC, FDFormer & SOTA baseline models
-├── scripts1             # Shell running scripts for reproduction
+├── models               # Implemented models: TFC, FDFormer & SOTA baseline models
+├── scripts             # Shell running scripts for reproduction
 ├── utils                # Metrics, loss function, visualization tools
 ├── run.py               # Main entry for model training
 └── README.md
